@@ -26,7 +26,7 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins,
-            CloudsPlugin,
+            CloudsPlugin::default(),
             #[cfg(feature = "fly_camera")]
             FlyCameraPlugin,
             #[cfg(feature = "debug")]

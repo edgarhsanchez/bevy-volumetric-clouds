@@ -234,6 +234,19 @@ impl Node for CloudsNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        // Fast path: clouds disabled — skip the per-frame Update dispatch
+        // once the one-shot Init has populated the atlas/worley LUTs.
+        //
+        // CRITICAL: we must NOT skip the Init dispatch even when disabled,
+        // otherwise the worley/atlas textures stay zeroed and toggling
+        // clouds on later produces no density anywhere along the rays
+        // (only the sky/sun is visible).
+        if matches!(self.state, CloudsState::Update)
+            && let Some(config) = world.get_resource::<CloudsConfig>()
+            && !config.enabled
+        {
+            return Ok(());
+        }
         let texture_bind_group = &world.resource::<CloudsImageBindGroup>().0;
         let uniform_bind_group = &world.resource::<CloudsUniformBindGroup>().0;
         let pipeline_cache = world.resource::<PipelineCache>();

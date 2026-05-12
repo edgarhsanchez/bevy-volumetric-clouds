@@ -2,8 +2,13 @@ use core::f32::consts::PI;
 
 use bevy::{light::light_consts::lux::FULL_DAYLIGHT, prelude::*};
 
+use crate::{CloudsCamera, config::CloudsConfig};
+
+/// Component placed on each of the 6 sky-box planes spawned by the plugin.
+/// Exposed so the host can toggle visibility / render layers.
 #[derive(Component)]
-pub(crate) struct SkyboxPlane {
+pub struct SkyboxPlane {
+    /// The unscaled local direction from the camera to this cube face.
     pub orig_translation: Vec3,
 }
 
@@ -118,19 +123,30 @@ pub(crate) fn setup_daylight(mut commands: Commands) {
 }
 
 pub(crate) fn update_skybox_transform(
-    camera: Single<(&Transform, &Camera, &Projection), Without<SkyboxPlane>>,
+    config: Res<CloudsConfig>,
+    marked: Query<(&Transform, &Camera, &Projection), (With<CloudsCamera>, Without<SkyboxPlane>)>,
+    fallback: Query<
+        (&Transform, &Camera, &Projection),
+        (With<Camera3d>, Without<CloudsCamera>, Without<SkyboxPlane>),
+    >,
     mut skybox: Query<(&mut Transform, &SkyboxPlane)>,
 ) {
-    let far = match camera.2 {
+    if !config.enabled {
+        return;
+    }
+    let Some((cam_tf, _camera, projection)) =
+        marked.iter().next().or_else(|| fallback.iter().next())
+    else {
+        return;
+    };
+    let far = match projection {
         Projection::Perspective(pers) => pers.far,
-        _ => {
-            panic!("unexpected projection")
-        }
+        _ => return,
     };
     let scale = far * 4.0;
 
     for (mut transform, plane) in skybox.iter_mut() {
         transform.scale = Vec3::splat(scale);
-        transform.translation = camera.0.translation + plane.orig_translation * scale;
+        transform.translation = cam_tf.translation + plane.orig_translation * scale;
     }
 }

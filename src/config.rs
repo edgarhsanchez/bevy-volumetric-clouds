@@ -74,6 +74,10 @@ pub struct CloudsConfig {
     pub render_resolution: Vec2,
     /// Velocity of the wind.
     pub wind_velocity: Vec3,
+    /// When `false`, the cloud compute pass and skybox updates are skipped
+    /// so the plugin imposes near-zero per-frame cost. The skybox meshes are
+    /// also expected to be hidden by the host. Defaults to `true`.
+    pub enabled: bool,
 }
 
 impl Default for CloudsConfig {
@@ -106,6 +110,7 @@ impl Default for CloudsConfig {
             ui_visible: true,
             render_resolution: Vec2::new(1920.0, 1080.0),
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),
+            enabled: true,
         }
     }
 }

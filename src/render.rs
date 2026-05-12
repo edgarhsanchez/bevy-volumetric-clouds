@@ -31,6 +31,18 @@ impl Material for CloudsMaterial {
             AssetPath::from_path_buf(embedded_path!("shaders/clouds.wgsl")).with_source("embedded"),
         )
     }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
 }
 
 pub(crate) struct CloudsShaderPlugin;

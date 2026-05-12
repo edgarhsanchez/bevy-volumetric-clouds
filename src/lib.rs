@@ -28,23 +28,47 @@ use crate::{
     uniforms::CloudsImage,
 };
 
+pub use crate::skybox::SkyboxPlane as CloudsSkyboxPlane;
+
+/// Marker component the host inserts on the single 3D camera that should
+/// receive the volumetric cloud skybox. When no entity has this marker, the
+/// systems fall back to the first 3D camera they find.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct CloudsCamera;
+
 use self::compute::CloudsComputePlugin;
 
 /// A plugin for rendering clouds.
 ///
 /// The configuration of the clouds can be changed using the [`CloudsConfig`] resource.
-pub struct CloudsPlugin;
+pub struct CloudsPlugin {
+    /// When `true` (default), the plugin spawns a default `DirectionalLight`
+    /// representing the sun. Set to `false` when the host already provides its
+    /// own lighting.
+    pub spawn_default_sun: bool,
+}
+
+impl Default for CloudsPlugin {
+    fn default() -> Self {
+        Self {
+            spawn_default_sun: true,
+        }
+    }
+}
 
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(CloudsConfig::default())
             .add_plugins((CloudsComputePlugin, CloudsShaderPlugin))
-            .add_systems(Startup, (clouds_setup, setup_daylight))
+            .add_systems(Startup, clouds_setup)
             .add_systems(
                 PostUpdate,
                 (update_skybox_transform, update_camera_matrices)
                     .after(TransformSystems::Propagate),
             );
+        if self.spawn_default_sun {
+            app.add_systems(Startup, setup_daylight);
+        }
         #[cfg(feature = "debug")]
         app.add_systems(EguiPrimaryContextPass, ui_system);
     }
@@ -84,11 +108,19 @@ fn clouds_setup(
 }
 
 fn update_camera_matrices(
-    cam_query: Single<(&GlobalTransform, &Camera)>,
-    mut config: ResMut<CameraMatrices>,
+    config: Res<CloudsConfig>,
+    marked: Query<(&GlobalTransform, &Camera), With<CloudsCamera>>,
+    fallback: Query<(&GlobalTransform, &Camera), (With<Camera3d>, Without<CloudsCamera>)>,
+    mut matrices: ResMut<CameraMatrices>,
 ) {
-    let (camera_transform, camera) = *cam_query;
-    config.translation = camera_transform.translation();
-    config.inverse_camera_view = camera_transform.to_matrix();
-    config.inverse_camera_projection = camera.computed.clip_from_view.inverse();
+    if !config.enabled {
+        return;
+    }
+    let Some((camera_transform, camera)) = marked.iter().next().or_else(|| fallback.iter().next())
+    else {
+        return;
+    };
+    matrices.translation = camera_transform.translation();
+    matrices.inverse_camera_view = camera_transform.to_matrix();
+    matrices.inverse_camera_projection = camera.computed.clip_from_view.inverse();
 }

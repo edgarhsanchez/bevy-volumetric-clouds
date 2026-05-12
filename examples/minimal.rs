@@ -4,7 +4,7 @@ use bevy_volumetric_clouds::CloudsPlugin;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, CloudsPlugin))
+        .add_plugins((DefaultPlugins, CloudsPlugin::default()))
         .add_systems(Startup, setup)
         .run();
 }
