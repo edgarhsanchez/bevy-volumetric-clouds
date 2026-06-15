@@ -92,7 +92,7 @@ fn cloud_gradient(normalized_height: f32) -> f32 {
 }
 
 fn get_cloud_map_density(pos: vec3f, normalized_height: f32) -> f32 {
-    let ps = pos;
+    let ps = pos - config.wind_displacement;
 
     var m = cloud_map_base(ps, normalized_height) * cloud_gradient(normalized_height);
 
@@ -322,12 +322,8 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
     return mix(col, original_color, config.reprojection_strength);
 }
 
-fn get_ray_origin(time: f32) -> vec3f {
-    return (
-        config.camera_translation -
-        config.wind_displacement +
-        vec3f(0.0, config.planet_radius, 0.0)
-    );
+fn get_ray_origin() -> vec3f {
+    return config.camera_translation + vec3f(0.0, config.planet_radius, 0.0);
 }
 
 fn get_ray_direction(frag_coord: vec2f) -> vec3f {
@@ -348,26 +344,39 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
 @compute @workgroup_size(8, 8, 1)
 fn init(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     let index = vec2f(f32(invocation_id.x), f32(invocation_id.y)) + vec2f(0.5);
+    let in_bounds = index.x <= config.render_resolution.x && index.y <= config.render_resolution.y;
     let inverted_y_coord = config.render_resolution.y - index.y;
 
     let worley_coord = vec2f(index.x, inverted_y_coord);
 
-    let z = floor(worley_coord.x / WORLEY_RESOLUTION_F32) + 8.0 * floor(worley_coord.y / WORLEY_RESOLUTION_F32);
-    let xy = vec2f(index.x, inverted_y_coord) % WORLEY_RESOLUTION_F32;
-    let xyz = vec3f(xy, z);
-
-    let worley_col = render_clouds_worley(xyz / WORLEY_RESOLUTION_F32);
-    let atlas_col = render_clouds_atlas(vec2f(index.x, inverted_y_coord));
+    var atlas_col = vec4f(0.0);
+    if (in_bounds) {
+        atlas_col = render_clouds_atlas(vec2f(index.x, inverted_y_coord));
+    }
 
     storageBarrier();
 
+    if (!in_bounds) {
+        return;
+    }
+
     textureStore(clouds_atlas_texture, invocation_id.xy, atlas_col);
-    textureStore(clouds_worley_texture, vec3u(u32(xyz.x), u32(xyz.y), u32(xyz.z)), worley_col);
+
+    let worley_slice_x = floor(worley_coord.x / WORLEY_RESOLUTION_F32);
+    let worley_slice_y = floor(worley_coord.y / WORLEY_RESOLUTION_F32);
+    if (worley_slice_x >= 0.0 && worley_slice_y >= 0.0 && worley_slice_x < 8.0 && worley_slice_y < 4.0) {
+        let z = worley_slice_x + 8.0 * worley_slice_y;
+        let xy = vec2f(index.x, inverted_y_coord) % WORLEY_RESOLUTION_F32;
+        let xyz = vec3f(xy, z);
+        let worley_col = render_clouds_worley(xyz / WORLEY_RESOLUTION_F32);
+        textureStore(clouds_worley_texture, vec3u(u32(xyz.x), u32(xyz.y), u32(xyz.z)), worley_col);
+    }
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>) {
     let index = vec2f(f32(invocation_id.x), f32(invocation_id.y)) + vec2f(0.5);
+    let in_bounds = index.x <= config.render_resolution.x && index.y <= config.render_resolution.y;
 
     // Load old camera matrix before storageBarrier to prevent race conditions;
     let sample_y = u32(config.render_resolution.y) - 1;
@@ -379,12 +388,20 @@ fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_
     );
     var frag_coord = vec2f(index.x, config.render_resolution.y - index.y);
 
-    var ray_origin = get_ray_origin(config.time);
-    var ray_dir = get_ray_direction(index);
-    var col = get_clouds_color(frag_coord, config.inverse_camera_view, old_cam, ray_dir, ray_origin);
-    let sky_color = vec4f(get_sky_color(ray_dir), 1.0);
+    var col = vec4f(0.0);
+    var sky_color = vec4f(0.0);
+    if (in_bounds) {
+        var ray_origin = get_ray_origin();
+        var ray_dir = get_ray_direction(index);
+        col = get_clouds_color(frag_coord, config.inverse_camera_view, old_cam, ray_dir, ray_origin);
+        sky_color = vec4f(get_sky_color(ray_dir), 1.0);
+    }
 
     storageBarrier();
+
+    if (!in_bounds) {
+        return;
+    }
 
     textureStore(clouds_render_texture, invocation_id.xy, col);
     textureStore(sky_texture, invocation_id.xy, sky_color);

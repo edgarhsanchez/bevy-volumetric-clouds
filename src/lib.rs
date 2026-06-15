@@ -22,7 +22,7 @@ use bevy_egui::EguiPrimaryContextPass;
 use crate::{
     compute::CameraMatrices,
     config::CloudsConfig,
-    images::build_images,
+    images::{build_images, cloud_output_size, upsert_cloud_output_image},
     render::{CloudsMaterial, CloudsShaderPlugin},
     skybox::{SkyboxMaterials, init_skybox_mesh, setup_daylight, update_skybox_transform},
     uniforms::CloudsImage,
@@ -35,6 +35,9 @@ pub use crate::skybox::SkyboxPlane as CloudsSkyboxPlane;
 /// systems fall back to the first 3D camera they find.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CloudsCamera;
+
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+struct CloudsOutputSize(UVec2);
 
 use self::compute::CloudsComputePlugin;
 
@@ -61,6 +64,7 @@ impl Plugin for CloudsPlugin {
         app.insert_resource(CloudsConfig::default())
             .add_plugins((CloudsComputePlugin, CloudsShaderPlugin))
             .add_systems(Startup, clouds_setup)
+            .add_systems(PostUpdate, sync_cloud_output_images)
             .add_systems(
                 PostUpdate,
                 (update_skybox_transform, update_camera_matrices)
@@ -76,12 +80,14 @@ impl Plugin for CloudsPlugin {
 
 fn clouds_setup(
     mut commands: Commands,
+    config: Res<CloudsConfig>,
     images: ResMut<Assets<Image>>,
     meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CloudsMaterial>>,
 ) {
+    let output_size = cloud_output_size(&config);
     let (cloud_render_image, cloud_atlas_image, cloud_worley_image, sky_image) =
-        build_images(images);
+        build_images(images, output_size);
 
     let material = materials.add(CloudsMaterial {
         cloud_render_image: cloud_render_image.clone(),
@@ -100,11 +106,43 @@ fn clouds_setup(
         cloud_worley_image,
         sky_image,
     });
+    commands.insert_resource(CloudsOutputSize(output_size));
     commands.insert_resource(CameraMatrices {
         translation: Vec3::ZERO,
         inverse_camera_projection: Mat4::IDENTITY,
         inverse_camera_view: Mat4::IDENTITY,
     });
+}
+
+fn sync_cloud_output_images(
+    config: Res<CloudsConfig>,
+    mut output_size: ResMut<CloudsOutputSize>,
+    mut images: ResMut<Assets<Image>>,
+    mut clouds_image: ResMut<CloudsImage>,
+    mut materials: ResMut<Assets<CloudsMaterial>>,
+) {
+    let desired_size = cloud_output_size(&config);
+    if desired_size == output_size.0 {
+        return;
+    }
+
+    upsert_cloud_output_image(
+        &mut images,
+        &mut clouds_image.cloud_render_image,
+        desired_size,
+    );
+    upsert_cloud_output_image(&mut images, &mut clouds_image.sky_image, desired_size);
+
+    for (_, material) in materials.iter_mut() {
+        material.cloud_render_image = clouds_image.cloud_render_image.clone();
+        material.sky_image = clouds_image.sky_image.clone();
+    }
+
+    output_size.0 = desired_size;
+    info!(
+        "volumetric_clouds: resized output textures to {}x{}",
+        desired_size.x, desired_size.y
+    );
 }
 
 fn update_camera_matrices(

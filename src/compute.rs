@@ -22,12 +22,23 @@ use std::borrow::Cow;
 
 use crate::config::CloudsConfig;
 
-use super::{
-    images::IMAGE_SIZE,
-    uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
-};
+use super::uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer};
 
 const WORKGROUP_SIZE: u32 = 8;
+
+fn workgroups_for_extent(width: u32, height: u32) -> (u32, u32) {
+    (
+        width.div_ceil(WORKGROUP_SIZE).max(1),
+        height.div_ceil(WORKGROUP_SIZE).max(1),
+    )
+}
+
+fn config_render_resolution(config: &CloudsConfig) -> UVec2 {
+    UVec2::new(
+        config.render_resolution.x.ceil().max(1.0) as u32,
+        config.render_resolution.y.ceil().max(1.0) as u32,
+    )
+}
 
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct CameraMatrices {
@@ -106,10 +117,22 @@ fn prepare_textures_bind_group(
     clouds_image: Res<CloudsImage>,
     render_device: Res<RenderDevice>,
 ) {
-    let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
-    let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
-    let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
-    let sky_view = gpu_images.get(&clouds_image.sky_image).unwrap();
+    let Some(cloud_render_view) = gpu_images.get(&clouds_image.cloud_render_image) else {
+        commands.remove_resource::<CloudsImageBindGroup>();
+        return;
+    };
+    let Some(cloud_atlas_view) = gpu_images.get(&clouds_image.cloud_atlas_image) else {
+        commands.remove_resource::<CloudsImageBindGroup>();
+        return;
+    };
+    let Some(cloud_worley_view) = gpu_images.get(&clouds_image.cloud_worley_image) else {
+        commands.remove_resource::<CloudsImageBindGroup>();
+        return;
+    };
+    let Some(sky_view) = gpu_images.get(&clouds_image.sky_image) else {
+        commands.remove_resource::<CloudsImageBindGroup>();
+        return;
+    };
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -193,12 +216,14 @@ enum CloudsState {
 
 struct CloudsNode {
     state: CloudsState,
+    initialized_resolution: Option<UVec2>,
 }
 
 impl Default for CloudsNode {
     fn default() -> Self {
         Self {
             state: CloudsState::Loading,
+            initialized_resolution: None,
         }
     }
 }
@@ -207,6 +232,12 @@ impl Node for CloudsNode {
     fn update(&mut self, world: &mut World) {
         let pipeline = world.resource::<CloudsPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
+        let current_resolution = world
+            .get_resource::<CloudsConfig>()
+            .map(config_render_resolution)
+            .unwrap_or(UVec2::new(1920, 1080));
+        let has_bind_groups = world.get_resource::<CloudsImageBindGroup>().is_some()
+            && world.get_resource::<CloudsUniformBindGroup>().is_some();
 
         // if the corresponding pipeline has loaded, transition to the next stage
         match self.state {
@@ -214,17 +245,32 @@ impl Node for CloudsNode {
                 if let CachedPipelineState::Ok(_) =
                     pipeline_cache.get_compute_pipeline_state(pipeline.init_pipeline)
                 {
+                    if has_bind_groups {
+                        self.initialized_resolution = Some(current_resolution);
+                    }
                     self.state = CloudsState::Init;
                 }
             }
             CloudsState::Init => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipeline.update_pipeline)
+                if self.initialized_resolution == Some(current_resolution)
+                    && let CachedPipelineState::Ok(_) =
+                        pipeline_cache.get_compute_pipeline_state(pipeline.update_pipeline)
                 {
                     self.state = CloudsState::Update;
+                } else if has_bind_groups {
+                    self.initialized_resolution = Some(current_resolution);
                 }
             }
-            CloudsState::Update => {}
+            CloudsState::Update => {
+                if self.initialized_resolution != Some(current_resolution) {
+                    if has_bind_groups {
+                        self.initialized_resolution = Some(current_resolution);
+                    } else {
+                        self.initialized_resolution = None;
+                    }
+                    self.state = CloudsState::Init;
+                }
+            }
         }
     }
 
@@ -247,8 +293,12 @@ impl Node for CloudsNode {
         {
             return Ok(());
         }
-        let texture_bind_group = &world.resource::<CloudsImageBindGroup>().0;
-        let uniform_bind_group = &world.resource::<CloudsUniformBindGroup>().0;
+        let Some(texture_bind_group) = world.get_resource::<CloudsImageBindGroup>() else {
+            return Ok(());
+        };
+        let Some(uniform_bind_group) = world.get_resource::<CloudsUniformBindGroup>() else {
+            return Ok(());
+        };
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<CloudsPipeline>();
 
@@ -256,8 +306,8 @@ impl Node for CloudsNode {
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
 
-        pass.set_bind_group(0, uniform_bind_group, &[]);
-        pass.set_bind_group(1, texture_bind_group, &[]);
+        pass.set_bind_group(0, &uniform_bind_group.0, &[]);
+        pass.set_bind_group(1, &texture_bind_group.0, &[]);
 
         match self.state {
             CloudsState::Loading => {}
@@ -266,22 +316,24 @@ impl Node for CloudsNode {
                     .get_compute_pipeline(pipeline.init_pipeline)
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    1,
-                );
+                let config = world.resource::<CloudsConfig>();
+                let resolution = config_render_resolution(config);
+                let width = resolution.x;
+                let height = resolution.y;
+                let (groups_x, groups_y) = workgroups_for_extent(width, height);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
             }
             CloudsState::Update => {
                 let update_pipeline = pipeline_cache
                     .get_compute_pipeline(pipeline.update_pipeline)
                     .unwrap();
                 pass.set_pipeline(update_pipeline);
-                pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    1,
-                );
+                let config = world.resource::<CloudsConfig>();
+                let resolution = config_render_resolution(config);
+                let width = resolution.x;
+                let height = resolution.y;
+                let (groups_x, groups_y) = workgroups_for_extent(width, height);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
             }
         }
         Ok(())
